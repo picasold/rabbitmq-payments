@@ -73,7 +73,7 @@ di komputer sendiri.
 
 ```bash
 # 1. ambil kode
-git clone https://github.com/<username>/rabbitmq-payments.git
+git clone https://github.com/picasold/rabbitmq-payments.git
 cd rabbitmq-payments
 
 # 2. nyalakan RabbitMQ, PostgreSQL, dan kedua consumer
