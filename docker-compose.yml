@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------------------
+# Semua yang dibutuhkan proyek ini: RabbitMQ, PostgreSQL, dan 2 consumer.
+# Jalankan dengan:  docker compose up -d --build
+# ---------------------------------------------------------------------------
+
+services:
+  # ------------------------------------------------------------------
+  # Message broker + Management UI
+  # ------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: payments-rabbitmq
+    hostname: payments-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-admin123}
+    ports:
+      - "5672:5672"     # protokol AMQP (dipakai aplikasi)
+      - "15672:15672"   # Management UI (dibuka di browser)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Database tujuan "update DB" milik Consumer A
+  # ------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: payments-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payments123}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Skema dibuat otomatis saat container pertama kali dibuat
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payments} -d ${POSTGRES_DB:-payments}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # CONSUMER A -- binding payment.success -> log & update DB
+  # ------------------------------------------------------------------
+  consumer-success:
+    build: .
+    container_name: payments-consumer-success
+    command: node src/consumer-success.js
+    environment:
+      AMQP_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-admin123}@rabbitmq:5672
+      DATABASE_URL: postgres://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments123}@postgres:5432/${POSTGRES_DB:-payments}
+      RETRY_TTL_MS: ${RETRY_TTL_MS:-5000}
+      MAX_RETRY: ${MAX_RETRY:-2}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # CONSUMER B -- binding payment.failed -> retry 2x (TTL 5s) -> DLQ
+  # ------------------------------------------------------------------
+  consumer-failed:
+    build: .
+    container_name: payments-consumer-failed
+    command: node src/consumer-failed.js
+    environment:
+      AMQP_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-admin123}@rabbitmq:5672
+      DATABASE_URL: postgres://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments123}@postgres:5432/${POSTGRES_DB:-payments}
+      RETRY_TTL_MS: ${RETRY_TTL_MS:-5000}
+      MAX_RETRY: ${MAX_RETRY:-2}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # PRODUCER -- tidak ikut `up`, dijalankan saat ingin mengirim pesan:
+  #     docker compose run --rm producer
+  # ------------------------------------------------------------------
+  producer:
+    build: .
+    command: node src/producer.js
+    environment:
+      AMQP_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-admin123}@rabbitmq:5672
+      DATABASE_URL: postgres://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments123}@postgres:5432/${POSTGRES_DB:-payments}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    profiles: ["tools"]
+
+volumes:
+  rabbitmq_data:
+  postgres_data:
